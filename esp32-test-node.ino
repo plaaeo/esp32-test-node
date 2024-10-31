@@ -1,10 +1,13 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <Arduino.h>
 #include <RadioLib.h>
 #include <SPI.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <cstdint>
+
+// Des-comente a linha abaixo para compilar o servidor (envia o pacote de 250
+// bytes). #define SERVER
 
 #define OLED_WIDTH 128
 #define OLED_HEIGHT 64
@@ -12,138 +15,197 @@
 #define OLED_SCL 18
 #define OLED_RST 21
 
-// SX1262 has the following connections
-// 
-// NSS pin:   GPIO_NUM_8
-// DIO1 pin:  GPIO_NUM_14
-// RST pin:   GPIO_NUM_12
-// BUSY pin:  GPIO_NUM_13
-SX1262 radio = new Module(GPIO_NUM_8, GPIO_NUM_14, GPIO_NUM_12, GPIO_NUM_13);
-Adafruit_SSD1306 display = Adafruit_SSD1306(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RST);
+#define LORA_NSS GPIO_NUM_8
+#define LORA_DIO1 GPIO_NUM_14
+#define LORA_RST GPIO_NUM_12
+#define LORA_BUSY GPIO_NUM_13
 
-void halt() {
-    while (true) { delay(10); }
-}
+SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
+Adafruit_SSD1306 display =
+    Adafruit_SSD1306(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RST);
 
-enum alignment_t { kStart, kCenter, kEnd };
+bool didIrq = false;
 
-// Função útil para desenhar texto com alinhamento na tela
-void drawAlignedText(const char *text, int16_t x, int16_t y,
-                     alignment_t horizontal = alignment_t::kStart,
-                     alignment_t vertical = alignment_t::kStart) {
-    int16_t _x, _y;
-    uint16_t w, h;
-
-    display.getTextBounds(text, 0, 0, &_x, &_y, &w, &h);
-
-    // Alinhar a posição do texto horizontalmente, de acordo com a regra
-    // dada
-    switch (horizontal) {
-    case kCenter:
-        x += (OLED_WIDTH - w) / 2;
-        break;
-    case kEnd:
-        x = OLED_WIDTH - w - x;
-        break;
-    }
-
-    // Alinhar a posição do texto verticalmente, de acordo com a regra dada
-    switch (vertical) {
-    case kCenter:
-        y += (OLED_HEIGHT + h) / 2;
-        break;
-    case kEnd:
-        y = OLED_HEIGHT - h - y;
-        break;
-    }
-
-    display.setCursor(x, y);
-    display.println(text);
-}
-
-bool recv = false;
-void printPacket(void) {
-    recv = true;
+// A ISR executada para qualquer evento LoRa, apenas seta a flag `didIrq`.
+//
+// O código que realmente lida com os interrupts é executado no `loop()`,
+// pois, ao executá-lo direto na ISR, consistentemente causava crashes
+// em testes.
+void IRAM_ATTR setIrqFlag(void) {
+    didIrq = true;
 }
 
 void setup() {
-    // put your setup code here, to run once:
     Serial.begin(9600);
 
+    // Inicializa o monitor OLED
     Wire.begin(OLED_SDA, OLED_SCL);
-    display.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);    
-    display.clearDisplay();
+    display.begin(SSD1306_SWITCHCAPVCC, 0x3D, true, false);
 
+    display.clearDisplay();
     display.setTextColor(WHITE);
     display.setTextSize(1);
 
-    char buffer[256];
+    // Inicializa o radio SX1262
+    if (radio.begin(915.0, 62.5, 7, 5, 0x12, 20) != RADIOLIB_ERR_NONE) {
+        Serial.printf("[ERR] Erro ao inicializar LoRa (cod. %d)\n", e);
 
-    int state = radio.begin(915.0, 125.0, 7, 5, 0x12, 15);
-    if (state != RADIOLIB_ERR_NONE) {
-        sprintf(buffer, "LoRa init failed");
-        drawAlignedText(buffer, 0, -4, kCenter, kCenter);
-
-        sprintf(buffer, "code %d");
-        drawAlignedText(buffer, 0, 4, kCenter, kCenter);
-        display.display();
-        halt();
+        while (true) {
+        };
     }
 
-    // set the function that will be called
-    // when new packet is received
-    radio.setPacketReceivedAction(printPacket);
+    // Define a ISR para quando uma mensagem for enviada/recebida.
+    radio.setPacketReceivedAction(setIrqFlag);
+    radio.setPacketSentAction(setIrqFlag);
+}
 
-    // start listening for LoRa packets
-    state = radio.startReceive();
-    if (state != RADIOLIB_ERR_NONE) {
-        sprintf(buffer, "LoRa recv failed");
-        drawAlignedText(buffer, 0, -4, kCenter, kCenter);
+enum state_t { kReceiving, kTransmitting } state;
 
-        sprintf(buffer, "code %d");
-        drawAlignedText(buffer, 0, 4, kCenter, kCenter);
-        display.display();
-        halt();
+// Conta quantos ciclos (transmitindo -> recebendo -> ...) ocorreram até agora.
+uint32_t cycles = 0;
+uint32_t cyclesTotal = 0;
+
+uint32_t rxSucessos = 0;
+uint32_t rxCorrompidos = 0;
+uint32_t rxPerdidos = 0;
+
+// O loop principal para o server.
+void serverLoop() {
+    int16_t e;
+
+    if (state == kReceiving) {
+        // Terminamos de receber a mensagem, ou ocorreu um erro na recepção.
+        byte msg[RADIOLIB_SX126X_MAX_PACKET_LENGTH];
+
+        int length = radio.getPacketLength();
+
+        switch (e = radio.readData(msg, length)) {
+        case RADIOLIB_ERR_NONE:
+            // Nenhum erro ocorreu ao receber o pacote.
+            rxSucessos++;
+            Serial.println("---,+");
+            break;
+
+        case RADIOLIB_ERR_CRC_MISMATCH:
+            rxCorrompidos++;
+            Serial.printf(
+                "[ERR] Um pacote corrompido foi recebido (%d bytes)\n", length);
+            break;
+
+        case RADIOLIB_ERR_RX_TIMEOUT:
+            rxPerdidos++;
+            Serial.println("[ERR] Um pacote não foi recebido.");
+            break;
+
+        default:
+            rxPerdidos++;
+            Serial.printf("[ERR] Erro ao receber mensagem (cod. %d)\n", e);
+            break;
+        }
+
+        // Transicionar para o estado `kTransmitting`
+        uint8_t response[] = "0Mensagem recebida.";
+        e = radio.startTransmit(response, sizeof(response));
+
+        if (e != RADIOLIB_ERR_NONE) {
+            Serial.printf("[ERR] Erro ao transmitir resposta (cod. %d)\n", e);
+        }
+
+        state = kTransmitting;
+    } else if (state == kTransmitting) {
+        // Terminamos de transmitir a resposta.
+        Serial.printf("---,%.0f,%.0f;\n", radio.getRSSI(), radio.getSNR());
+
+        e = radio.startReceive(3000);
+        if (e != RADIOLIB_ERR_NONE) {
+            Serial.printf(
+                "[ERR] Erro ao preparar para receber mensagem (cod. %d)\n", e);
+        }
+
+        state = kReceiving;
+        cycles++;
+    }
+}
+
+// O loop principal para o client.
+void clientLoop() {
+    int16_t e;
+
+    if (state == kReceiving) {
+        // Terminamos de receber a resposta, ou ocorreu um erro na recepção.
+        byte msg[RADIOLIB_SX126X_MAX_PACKET_LENGTH];
+
+        int length = radio.getPacketLength();
+
+        switch (e = radio.readData(msg, length)) {
+        case RADIOLIB_ERR_NONE:
+            // Nenhum erro ocorreu ao receber o pacote.
+            rxSucessos++;
+            Serial.printf("---,True,%.0f,%.0f;\n", radio.getRSSI(),
+                          radio.getSNR());
+            break;
+
+        case RADIOLIB_ERR_CRC_MISMATCH:
+            // Um pacote corrompido foi recebido.
+            rxCorrompidos++;
+            Serial.printf("---,Fail,%.0f,%.0f;\n", radio.getRSSI(),
+                          radio.getSNR());
+            break;
+
+        case RADIOLIB_ERR_RX_TIMEOUT:
+            // A mensagem não foi respondida a tempo.
+            rxPerdidos++;
+            Serial.println("---,False,*;");
+            break;
+
+        default:
+            // Um erro específico ocorreu ao receber a mensagem.
+            rxPerdidos++;
+            Serial.printf("---,False(%d),*;\n", e);
+            break;
+        }
+
+        // Transicionar para o estado `kTransmitting`
+        e = radio.startTransmit(mensagemLarga, sizeof(mensagemLarga));
+
+        if (e != RADIOLIB_ERR_NONE) {
+            Serial.printf("[ERR] Erro ao transmitir resposta (cod. %d)\n", e);
+        }
+
+        state = kTransmitting;
+        cycles++;
+    } else if (state == kTransmitting) {
+        // Terminamos de transmitir a mensagem.
+        Serial.println("---,+");
+
+        e = radio.startReceive(3000);
+        if (e != RADIOLIB_ERR_NONE) {
+            Serial.printf(
+                "[ERR] Erro ao preparar para receber mensagem (cod. %d)\n", e);
+        }
+
+        state = kReceiving;
     }
 }
 
 void loop() {
-    char buffer[256];
-    static uint32_t packetNumber = 0;
+    if (!didIrq)
+        return;
 
-    // put your main code here, to run repeatedly:
-    if (recv) {
-        display.clearDisplay();
+    didIrq = false;
 
-        byte packet[255];
-        int numBytes = radio.getPacketLength();
-        int state = radio.readData(packet, numBytes);
+#ifdef SERVER
+    serverLoop();
+#else
+    clientLoop();
+#endif
 
-        snprintf(buffer, 255, "[ Packet %d ]", ++packetNumber);
-        drawAlignedText(buffer, 0, -8, kCenter, kCenter);
+    // Iniciar próxima lista de testes ao chegar no ciclo 100.
+    if (cycles < 100)
+        return;
 
-        if (state == RADIOLIB_ERR_NONE) {
-            // packet was successfully received
-            snprintf(buffer, 255, "SNR: %.1f dB", radio.getSNR());
-            drawAlignedText(buffer, 0, 12, kCenter, kCenter);
+    totalCycles += cycles;
+    cycles = 0;
 
-            display.fillRect(0, OLED_HEIGHT - 8, OLED_WIDTH, 8, WHITE);
-            display.setTextColor(BLACK);
-            snprintf(buffer, 255, "%16s", packet);
-            drawAlignedText(buffer, 0, 0, kCenter, kEnd);
-            
-            display.setTextColor(WHITE);
-            snprintf(buffer, 255, "RSSI: %.1f dBm", radio.getRSSI());
-            
-        } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
-            snprintf(buffer, 255, "CRC mismatch");
-        } else {
-            snprintf(buffer, 255, "Error code %d", state);
-        }
-
-        drawAlignedText(buffer, 0, 4, kCenter, kCenter);
-        display.display();
-    }
-
-    recv = false;
+    // TODO
 }

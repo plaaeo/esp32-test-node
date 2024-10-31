@@ -1,0 +1,8 @@
+---
+Language: Cpp
+IndentWidth: 4
+UseTab: Never
+TabWidth: 4
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: None
+NamespaceIndentation: All
