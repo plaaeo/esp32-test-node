@@ -5,50 +5,46 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <cstdint>
+
 #include "pins_arduino.h"
+#include "gui/helper.h"
+
+const uint32_t sf[] = { 7, 8, 9, 10, 11, 12 };
+const uint32_t cr[] = { 5, 8 };
+    
+const size_t sfLen = sizeof(sf) / sizeof(uint32_t);
+const size_t crLen = sizeof(cr) / sizeof(uint32_t);
 
 #define RX_WAIT_DELAY 100
+#define TESTS_PER_CYCLE 100
+#define POSSIBLE_PARAMETERS (sfLen * crLen)
 
 // Definir pinos dependendo da placa
 #if defined(WIFI_LoRa_32_V2)
-    #define Radio     SX1276
+    #define Radio SX1276
     #define MAX_PACKET_LENGTH RADIOLIB_SX127X_MAX_PACKET_LENGTH
-
-    #define LORA_NSS  SS
-    #define LORA_DIO1 DIO0 // 4
-    #define LORA_RST  RST_LoRa // 12
-    #define LORA_BUSY DIO1 // 16
-
-    #define OLED_SDA  GPIO_NUM_4
-    #define OLED_SCL  GPIO_NUM_15
-    #define OLED_RST  GPIO_NUM_16
-    #define BUTTON    GPIO_NUM_0
 #elif defined(WIFI_LoRa_32_V3)
-    #define SERVER
-    #define Radio     SX1262
+    #define Radio SX1262
     #define MAX_PACKET_LENGTH RADIOLIB_SX126X_MAX_PACKET_LENGTH
-
-    #define LORA_NSS  8  // SS // 8
-    #define LORA_DIO1 14 // DIO0 // 14
-    #define LORA_RST  12 // RST_LoRa // 12
-    #define LORA_BUSY 13 // BUSY_LoRa // 13
-
-    #define OLED_SDA  GPIO_NUM_17
-    #define OLED_SCL  GPIO_NUM_18
-    #define OLED_RST  GPIO_NUM_21
-    #define BUTTON    GPIO_NUM_0
 #endif
 
-#define OLED_WIDTH 128
-#define OLED_HEIGHT 64
+#define BUTTON    GPIO_NUM_0
+#define LORA_NSS  SS
+#define LORA_DIO  DIO0
+#define LORA_RST  RST_LoRa
 
-SPIClass spiSX(SPI);
-SPISettings spiSettings(2000000, MSBFIRST, SPI_MODE0);
-Radio radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY, spiSX, spiSettings);
+#ifdef BUSY_LoRa
+    #define LORA_BUSY BUSY_LoRa
+#else
+    #define LORA_BUSY RADIOLIB_NC
+#endif
 
-Adafruit_SSD1306 display = Adafruit_SSD1306(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RST);
+button_t button = button_t(BUTTON);
 
-uint8_t largeMessage[RADIOLIB_SX126X_MAX_PACKET_LENGTH];
+Radio radio = new Module(LORA_NSS, LORA_DIO, LORA_RST, LORA_BUSY);
+
+Adafruit_SSD1306 display = Adafruit_SSD1306(DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, RST_OLED);
+
 volatile bool didIrq = false;
 
 // A ISR executada para qualquer evento LoRa, apenas seta a flag `didIrq`.
@@ -67,6 +63,31 @@ void waitForIrq(void) {
     didIrq = false;
 }
 
+DataRate_t dr;
+
+// Conta quantos ciclos (transmitindo -> recebendo -> ...) ocorreram até agora.
+uint32_t cycles = 0;
+uint32_t cyclesTotal = 0;
+
+uint32_t rxSucessos = 0;
+uint32_t rxCorrompidos = 0;
+uint32_t rxPerdidos = 0;
+
+// Atualiza os parametros para o teste atual.
+void updateParameters() {
+    uint32_t index = cyclesTotal / TESTS_PER_CYCLE;
+
+    dr.lora.bandwidth = 62.5;
+    dr.lora.codingRate = cr[index % crLen];
+    dr.lora.spreadingFactor = sf[(index / crLen) % sfLen];
+
+    radio.setDataRate(dr);
+}
+
+uint8_t largeMessage[MAX_PACKET_LENGTH];
+
+enum { kReceiver, kTransmitter } role = kReceiver;
+
 void setup() {
     largeMessage[0] = '0';
 
@@ -75,13 +96,13 @@ void setup() {
     }
 
     Serial.begin(115200);
-    spiSX.begin(SCK, MISO, MOSI, SS);
+    SPI.begin(SCK, MISO, MOSI, SS);
 
     // Inicia o botão programável
-    pinMode(BUTTON, INPUT_PULLUP);
+    button.setup();
 
     // Inicializa o monitor OLED
-    Wire.begin(OLED_SDA, OLED_SCL);
+    Wire.begin(SDA_OLED, SCL_OLED);
     display.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
 
     display.clearDisplay();
@@ -89,7 +110,7 @@ void setup() {
     display.setTextSize(1);
     
     // Inicializa o radio LoRa
-    int16_t e = radio.begin(915.0, 62.5, 7, 5, 0x12, 10);
+    int16_t e = radio.begin(915.0, 62.5, 7, 5, 0x12, 10, 8);
     if (e != RADIOLIB_ERR_NONE) {
         Serial.printf("[ERR] Erro ao inicializar LoRa (cod. %d)\n", e);
 
@@ -101,15 +122,9 @@ void setup() {
     radio.setPacketSentAction(setIrqFlag);
 
     Serial.println("Inicializado com sucesso.");
+
+    updateParameters();
 }
-
-// Conta quantos ciclos (transmitindo -> recebendo -> ...) ocorreram até agora.
-uint32_t cycles = 0;
-uint32_t cyclesTotal = 0;
-
-uint32_t rxSucessos = 0;
-uint32_t rxCorrompidos = 0;
-uint32_t rxPerdidos = 0;
 
 uint32_t cvtTimeout(uint32_t timeout) {
     #if defined(WIFI_LoRa_32_V2)
@@ -129,20 +144,13 @@ int16_t sendBlocking(const uint8_t* message, uint8_t size) {
 
     if (e != RADIOLIB_ERR_NONE) {
         Serial.printf("[ERR] Erro ao transmitir mensagem (cod. %d)\n", e);
-        // radio.finishTransmit();
-        // radio.standby();
         return e;
     }
 
     // Esperar o pacote terminar de ser enviado.
     waitForIrq();
 
-    // e = radio.finishTransmit();
-    // if (e != RADIOLIB_ERR_NONE) {
-    //     Serial.printf("[ERR] Erro ao finalizar transmissao (cod. %d)\n", e);
-    // }
-
-    return e;// radio.standby();
+    return e;
 }
 
 struct recv_result_t {
@@ -167,8 +175,6 @@ struct recv_result_t recvBlocking(uint32_t timeout) {
 
     if (res.e != RADIOLIB_ERR_NONE) {
         Serial.printf("[ERR] Erro ao preparar para receber mensagem (cod. %d)\n", res.e);
-        // radio.standby();
-        
         return res;
     }
 
@@ -181,8 +187,6 @@ struct recv_result_t recvBlocking(uint32_t timeout) {
 
     if (res.e != RADIOLIB_ERR_NONE) {
         Serial.printf("[ERR] Erro ao receber mensagem (cod. %d)\n", res.e);
-        // radio.standby();
-        
         return res;
     }
     
@@ -190,7 +194,7 @@ struct recv_result_t recvBlocking(uint32_t timeout) {
     return res;
 }
 
-void doTransmitterLoop() {
+int16_t doTransmitterLoop() {
     // E1 - Tentar enviar o pacote grande repetidamente até ter um sucesso;
     // 
     // ATENÇÃO: Um sucesso significa que o módulo conseguiu transmitir a mensagem completa,
@@ -254,9 +258,10 @@ void doTransmitterLoop() {
     }
 
     radio.standby();
+    return recv.e;
 }
 
-void doReceiverLoop() {
+int16_t doReceiverLoop() {
     // E1 - Receber mensagem do receptor até ter um sucesso;
     recv_result_t recv = { 0,0,0 };
 
@@ -315,49 +320,148 @@ void doReceiverLoop() {
     }
     
     radio.standby();
+    return recv.e;
 }
 
-DataRate_t dr;
+// Desenha o cargo do ESP e o número atual do teste.
+void drawTitle() {
+    const char* roleStr = role == kTransmitter ? "Transmissor" : "Receptor";
 
-// Atualiza os parametros para o teste atual.
-void updateParameters() {
-    const uint32_t sf[] = { 7, 8, 9, 10, 11, 12 };
-    const uint32_t cr[] = { 5, 8 };
+    char cycleStr[64];
+
+    display.setCursor(0, 0);
+    display.fillRect(0, 0, display.width(), 10, WHITE);
+
+    display.setTextColor(BLACK);
+    drawAlignedText(&display, roleStr, 2, 2, kStart);
+
+    // Desenhar contagem de ciclos
+    snprintf(cycleStr, 64, "%d/%d", cyclesTotal + cycles + 1, POSSIBLE_PARAMETERS * TESTS_PER_CYCLE);
+    drawAlignedText(&display, cycleStr, 2, 2, kEnd);
+}
+
+// Desenha um relatório do estado atual dos testes na tela.
+void drawReport() {
+    char sfStr[8];
+    char crStr[8];
+    char rssiStr[16];
+    char snrStr[16];
+
+    char okStr[24];
+    char crcStr[24];
+    char lostStr[24];
     
-    const size_t sfLen = sizeof(sf) / sizeof(uint32_t);
-    const size_t crLen = sizeof(cr) / sizeof(uint32_t);
+    // Desenhar parâmetros
+    display.setTextColor(WHITE);
+    snprintf(sfStr, 8, "SF %hhu", dr.lora.spreadingFactor);
+    snprintf(crStr, 8, "CR %hhu", dr.lora.codingRate);
+    drawAlignedText(&display, sfStr, 2, 10, kStart, kEnd);
+    drawAlignedText(&display, crStr, 2, 2, kStart, kEnd);
 
-    uint32_t index = cyclesTotal / 100;
+    // Desenhar RSSI e SNR
+    snprintf(rssiStr, 16, "%.1f dBm", radio.getRSSI());
+    snprintf(snrStr, 16, "%.1f dB", radio.getSNR());
+    drawAlignedText(&display, "RSSI", 20, -12, kStart, kCenter);
+    drawAlignedText(&display, "SNR", 20,  -4, kStart, kCenter);
+    drawAlignedText(&display, rssiStr, 20, -12, kEnd, kCenter);
+    drawAlignedText(&display, snrStr, 20,  -4, kEnd, kCenter);
 
-    dr.lora.bandwidth = 62.5;
-    dr.lora.codingRate = cr[index % crLen];
-    dr.lora.spreadingFactor = sf[(index / crLen) % sfLen];
-
-    radio.setDataRate(dr);
+    // Desenhar contagens atuais
+    snprintf(okStr,   24, "%u ok  ", rxSucessos);
+    snprintf(crcStr,  24, "%u crc ", rxCorrompidos);
+    snprintf(lostStr, 24, "%u lost", rxPerdidos);
+    drawAlignedText(&display, okStr, 2, 18, kEnd, kEnd);
+    drawAlignedText(&display, crcStr, 2,  10, kEnd, kEnd);
+    drawAlignedText(&display, lostStr, 2,  2, kEnd, kEnd);
 }
 
 void loop() {
-    // Atualizar os parametros para a atual linha de testes
-    updateParameters();
-    
-    display.clearDisplay();
-    display.setCursor(0, 0);
+    static enum { kSelection, kTesting } state = kSelection;
 
-    #ifdef SERVER
-        display.println("[Transmissor]");
-    #else
-        display.println("[Receptor]");
-    #endif
+    button.loop(400, 600);
 
-    display.printf("Ciclo %d", cyclesTotal);
-    display.setCursor(0, 10);
-    display.println("Aguardando...");
-    display.printf("SF%d / CR%d", dr.lora.spreadingFactor, dr.lora.codingRate);
+    const char* roleStr = role == kTransmitter ? "Transmissor" : "Receptor";
 
-    display.display();
+    switch (state) {
+        case kSelection: {
+            if (button.longPressed()) {
+                role = role == kTransmitter ? kReceiver : kTransmitter;
+            } else if (button.pressed()) {
+                state = kTesting;
+                Serial.printf("Cargo \"%s\" selecionado\n", roleStr);
+                return;
+            }
 
-    while (digitalRead(BUTTON) != LOW);
+            display.clearDisplay();
+            display.setTextColor(WHITE);
 
+            const int16_t rectWidth = 11 * 8 + 2;
+            drawAlignedText(&display, "Selecione o cargo", 0, -16, kCenter, kCenter);
+            
+            display.fillRect(
+                (display.width() / 2) - (rectWidth / 2),
+                (display.height() / 2) - 4 + (role == kTransmitter ? 10 : 0) - 1,
+                rectWidth,
+                10,
+                WHITE
+            );
+
+            display.setTextColor(role == kReceiver ? BLACK : WHITE);
+            drawAlignedText(&display, "Receptor", 0, 0, kCenter, kCenter);
+
+            display.setTextColor(role == kTransmitter ? BLACK : WHITE);
+            drawAlignedText(&display, "Transmissor", 0, 10, kCenter, kCenter);
+
+            display.display();
+            break;
+        }
+            
+        case kTesting: {
+            // Atualizar os parametros para a atual linha de testes
+            updateParameters();
+            
+            {
+                char paramStr[32];
+
+                display.clearDisplay();
+                drawTitle();
+                
+                drawAlignedText(&display, "Pressione", 0, -16, kCenter, kCenter);
+                drawAlignedText(&display, "para iniciar", 0, -8, kCenter, kCenter);
+                
+                snprintf(paramStr, 16, "SF %d / CR %d", dr.lora.spreadingFactor, dr.lora.codingRate);
+                drawAlignedText(&display, paramStr, 0, 4, kCenter, kCenter);
+
+                display.display();
+            }
+
+            while (!button.pressed()) { };
+
+            do {
+                int16_t result;
+                if (role == kTransmitter)
+                    result = doTransmitterLoop();
+                else
+                    result = doReceiverLoop();
+
+                // Desenhar tela de relatório
+                display.clearDisplay();
+                drawTitle();
+                drawReport();
+                display.display();
+            } while (cycles++ < TESTS_PER_CYCLE);
+            
+            // Iniciar próxima lista de testes ao chegar no ciclo 100.
+            cyclesTotal += cycles;
+            cycles = 0;
+
+            Serial.println("Um ciclo foi completo!");
+
+            break;
+        }
+    }
+
+/*
     do {
         display.clearDisplay();
         display.setCursor(0, 0);
@@ -387,4 +491,5 @@ void loop() {
     cycles = 0;
 
     Serial.println("Um ciclo foi completo!");
+    */
 }
