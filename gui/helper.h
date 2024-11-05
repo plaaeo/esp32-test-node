@@ -2,16 +2,11 @@
 #include <Adafruit_GFX.h>
 #include <cstdint>
 
-enum alignment_t {
-    kStart,
-    kCenter,
-    kEnd
-};
+enum alignment_t { kStart, kCenter, kEnd };
 
 // Função útil para desenhar texto com alinhamento na tela
-void drawAlignedText(Adafruit_GFX* display,
-                     const char *text, int16_t x, int16_t y,
-                     alignment_t horizontal = alignment_t::kStart,
+void drawAlignedText(Adafruit_GFX *display, const char *text, int16_t x,
+                     int16_t y, alignment_t horizontal = alignment_t::kStart,
                      alignment_t vertical = alignment_t::kStart) {
     int16_t _x, _y;
     uint16_t w, h;
@@ -51,12 +46,7 @@ enum action_t {
     kWait,
 };
 
-enum button_state_t {
-    kReleased,
-    kPressed,
-    kLongPressed,
-    kHeld
-};
+enum button_state_t { kReleased, kPressed, kLongPressed, kHeld };
 
 // Armazena o estado de um botão físico.
 class button_t {
@@ -79,54 +69,58 @@ public:
     // Atualiza o estado da estrutura para refletir o estado do botão.
     void loop(uint32_t longPressTime, uint32_t holdTime) {
         bool pressed = digitalRead(this->pin) == LOW;
-        
+
         switch (this->action) {
-            // Aguarda até o botão ser solto
-            case kWait: {
-                if (!pressed) {
-                    this->action = kIdle;
-                    this->state = kReleased;
-                }
-
-                break;
+        // Aguarda até o botão ser solto
+        case kWait: {
+            if (!pressed) {
+                this->action = kIdle;
+                this->state = kReleased;
             }
 
-            // Inicia o processamento da entrada caso o botão esteja solto
-            case kIdle: {
-                if (pressed) {
-                    this->action = kProcess;
-                    this->state = kPressed;
-                    this->lastEvent = millis();
-                }
-                
-                break;
+            break;
+        }
+
+        // Inicia o processamento da entrada caso o botão esteja solto
+        case kIdle: {
+            if (pressed) {
+                this->action = kProcess;
+                this->state = kPressed;
+                this->lastEvent = millis();
             }
 
-            // Processa a entrada atual e retorna ao estado `kIdle` ao soltar o botão
-            case kProcess: {
-                if (!pressed) {
-                    this->buffer = this->state;
-                    this->state = kReleased;
-                    this->action = kIdle;
-                } else {
-                    uint32_t now = millis();
-                    uint32_t elapsed = now - this->lastEvent;
+            break;
+        }
 
-                    if (elapsed > longPressTime) {
-                        this->state = kLongPressed;
-                    }
+        // Processa a entrada atual e retorna ao estado `kIdle` ao soltar o
+        // botão
+        case kProcess: {
+            if (!pressed) {
+                this->buffer = this->state;
+                this->state = kReleased;
+                this->action = kIdle;
+            } else {
+                uint32_t now = millis();
+                uint32_t elapsed = now - this->lastEvent;
 
-                    if (elapsed > holdTime) {
-                        this->state = kHeld;
-                    }
+                if (elapsed > longPressTime) {
+                    this->state = kLongPressed;
+                }
+
+                if (elapsed > holdTime) {
+                    this->state = kHeld;
                 }
             }
+
+            break;
+        }
         }
     }
 
-    // Detecta se o usuário está segurando o botão a mais de `holdTime` millisegundos.
-    // Caso true seja passado como parâmetro para o reset, o botão irá reiniciar o contador
-    // e esperar novamente para detectar se o usuário ainda está segurando o botão.
+    // Detecta se o usuário está segurando o botão a mais de `holdTime`
+    // millisegundos. Caso true seja passado como parâmetro para o reset, o
+    // botão irá reiniciar o contador e esperar novamente para detectar se o
+    // usuário ainda está segurando o botão.
     bool held() {
         if (this->state == kHeld) {
             this->state = kLongPressed;
@@ -137,8 +131,9 @@ public:
         return false;
     }
 
-    // Retorna true no instante que é detectado que o usuário está segurando o botão a mais de
-    // `longPressTime` millisegundos, retornando `false` até que o usuário solte o botão.
+    // Retorna true no instante que é detectado que o usuário está segurando o
+    // botão a mais de `longPressTime` millisegundos, retornando `false` até que
+    // o usuário solte o botão.
     bool longPressed() {
         if (this->state == kLongPressed && this->action == kProcess) {
             this->action = kWait;
@@ -157,8 +152,9 @@ private:
     button_state_t consume(button_state_t condition) {
         button_state_t buffer = this->buffer;
 
-        if (buffer == condition)
+        if (buffer == condition) {
             this->buffer = kReleased;
+        }
 
         return buffer;
     }
