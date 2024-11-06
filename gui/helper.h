@@ -38,8 +38,6 @@ void drawAlignedText(Adafruit_GFX *display, const char *text, int16_t x,
     display->println(text);
 }
 
-#define LONG_PRESS_DURATION 200
-
 enum action_t {
     kIdle,
     kProcess,
@@ -51,8 +49,10 @@ enum button_state_t { kReleased, kPressed, kLongPressed, kHeld };
 // Armazena o estado de um botão físico.
 class button_t {
 public:
-    button_t(uint32_t pin) {
+    button_t(uint32_t pin, uint32_t longPressTime, uint32_t holdTime) {
         this->pin = pin;
+        this->longPressTime = longPressTime;
+        this->holdTime = holdTime;
 
         this->action = kIdle;
         this->lastEvent = 0;
@@ -67,7 +67,7 @@ public:
     }
 
     // Atualiza o estado da estrutura para refletir o estado do botão.
-    void loop(uint32_t longPressTime, uint32_t holdTime) {
+    void loop() {
         bool pressed = digitalRead(this->pin) == LOW;
 
         switch (this->action) {
@@ -103,11 +103,11 @@ public:
                 uint32_t now = millis();
                 uint32_t elapsed = now - this->lastEvent;
 
-                if (elapsed > longPressTime) {
+                if (elapsed > this->longPressTime) {
                     this->state = kLongPressed;
                 }
 
-                if (elapsed > holdTime) {
+                if (elapsed > this->holdTime) {
                     this->state = kHeld;
                 }
             }
@@ -147,6 +147,10 @@ public:
     bool pressed() {
         return consume(kPressed) == kPressed;
     }
+
+public:
+    uint32_t longPressTime;
+    uint32_t holdTime;
 
 private:
     button_state_t consume(button_state_t condition) {

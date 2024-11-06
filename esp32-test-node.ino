@@ -15,9 +15,18 @@ const uint32_t cr[] = {5, 8};
 const size_t sfLen = sizeof(sf) / sizeof(uint32_t);
 const size_t crLen = sizeof(cr) / sizeof(uint32_t);
 
-#define RX_WAIT_DELAY 100
-#define TESTS_PER_CYCLE 5
 #define POSSIBLE_PARAMETERS (sfLen * crLen)
+
+// Define o tempo que o receptor e o transmissor esperam antes de transmitir uma
+// mensagem. Usado para permitir que o outro ESP comece a receber mensagens a
+// tempo.
+#define RX_WAIT_DELAY 100
+
+// Define a quantidade de testes para cada configuração do SF e CR
+#define TESTS_PER_CONFIG 100
+
+// Comente para remover feedback sobre o estado do teste
+#define DO_STATE_FEEDBACK
 
 // Definir pinos dependendo da placa
 #if defined(WIFI_LoRa_32_V2)
@@ -40,7 +49,7 @@ const size_t crLen = sizeof(cr) / sizeof(uint32_t);
 #define LORA_BUSY RADIOLIB_NC
 #endif
 
-button_t button = button_t(BUTTON);
+button_t button = button_t(BUTTON, 400, 600);
 
 Radio radio = new Module(LORA_NSS, LORA_DIO, LORA_RST, LORA_BUSY);
 
@@ -68,34 +77,44 @@ void waitForIrq(void) {
 
 DataRate_t dr;
 
-// Conta quantos ciclos (transmitindo -> recebendo -> ...) ocorreram até agora.
-uint32_t cycles = 0;
-uint32_t cyclesTotal = 0;
+struct test_progress_t {
+    // O número do teste atual (de 0 até TESTS_PER_CONFIG - 1)
+    uint32_t progress;
+    uint32_t successes;
+    uint32_t crcErrors;
+    uint32_t losses;
+};
 
-uint32_t rxSucessos = 0;
-uint32_t rxCorrompidos = 0;
-uint32_t rxPerdidos = 0;
+// Armazena as estatísticas para o teste atual (uma configuração)
+test_progress_t currentTest;
+// Armazena as estatísticas cumulativas para todos os testes (todas as
+// configurações)
+test_progress_t wholeTest{0, 0, 0, 0};
 
 // Atualiza os parametros para o teste atual.
-void updateParameters() {
-    uint32_t index = cyclesTotal / TESTS_PER_CYCLE;
+// Retorna o "índice" da configuração atual.
+uint32_t updateParameters() {
+    uint32_t index = wholeTest.progress / TESTS_PER_CONFIG;
 
-    dr.lora.bandwidth = 62.5;
+    dr.lora.bandwidth = 250;
     dr.lora.codingRate = cr[index % crLen];
     dr.lora.spreadingFactor = sf[(index / crLen) % sfLen];
 
     radio.setDataRate(dr);
+
+    return index;
 }
 
-uint8_t largeMessage[MAX_PACKET_LENGTH];
+uint8_t msgTransmitter[MAX_PACKET_LENGTH];
+uint8_t msgReceiver[] = "0Mensagem recebida";
 
 enum { kReceiver, kTransmitter } role = kReceiver;
 
 void setup() {
-    largeMessage[0] = '0';
+    msgTransmitter[0] = '0';
 
-    for (size_t i = 1; i < sizeof(largeMessage); i++) {
-        largeMessage[i] = 'A';
+    for (size_t i = 1; i < sizeof(msgTransmitter); i++) {
+        msgTransmitter[i] = 'A';
     }
 
     Serial.begin(115200);
@@ -131,14 +150,7 @@ void setup() {
 }
 
 uint32_t cvtTimeout(uint32_t timeout) {
-#if defined(WIFI_LoRa_32_V2)
-    // TODO: Testar
-    timeout = 192;
-#elif defined(WIFI_LoRa_32_V3)
-    timeout = (timeout * 1000000) / 15625;
-#endif
-
-    return timeout;
+    return (timeout * 1000000) / 15625;
 }
 
 // Envia um pacote e aguarda ele terminar de ser enviado.
@@ -207,6 +219,7 @@ int16_t doTransmitterLoop() {
     // Esperamos um tempo antes de transmitir a próxima mensagem para que o
     // receptor consiga mudar de estado a tempo.
     delay(RX_WAIT_DELAY);
+    drawFeedback(false);
 
     do {
         if (e != RADIOLIB_ERR_NONE) {
@@ -214,7 +227,7 @@ int16_t doTransmitterLoop() {
             delay(10);
         }
 
-        e = sendBlocking(largeMessage, sizeof(largeMessage));
+        e = sendBlocking(msgTransmitter, sizeof(msgTransmitter));
     } while (e != RADIOLIB_ERR_NONE);
 
     // E2 - Receber ACK do receptor até ter um sucesso
@@ -222,6 +235,7 @@ int16_t doTransmitterLoop() {
     // Similarmente, um sucesso ocorre quando o módulo consegue entrar no estado
     // de "receptor" com sucesso.
     recv_result_t recv = {0, 0, 0};
+    drawFeedback(true);
 
     do {
         if (recv.e != RADIOLIB_ERR_NONE) {
@@ -235,25 +249,25 @@ int16_t doTransmitterLoop() {
     switch (recv.e) {
     case RADIOLIB_ERR_NONE:
         // Nenhum erro ocorreu ao receber o pacote.
-        rxSucessos++;
+        currentTest.successes++;
         Serial.printf("---,True,%.0f,%.0f;\n", radio.getRSSI(), radio.getSNR());
         break;
 
     case RADIOLIB_ERR_CRC_MISMATCH:
         // Um pacote corrompido foi recebido.
-        rxCorrompidos++;
+        currentTest.crcErrors++;
         Serial.printf("---,Fail,%.0f,%.0f;\n", radio.getRSSI(), radio.getSNR());
         break;
 
     case RADIOLIB_ERR_RX_TIMEOUT:
         // A mensagem não foi respondida a tempo.
-        rxPerdidos++;
+        currentTest.losses++;
         Serial.println("---,False,*;");
         break;
 
     default:
         // Um erro específico ocorreu ao receber a mensagem.
-        rxPerdidos++;
+        currentTest.losses++;
         Serial.printf("---,False(%d),*;\n", recv.e);
         break;
     }
@@ -264,9 +278,10 @@ int16_t doTransmitterLoop() {
 
 int16_t doReceiverLoop() {
     // E1 - Receber mensagem do receptor até ter um sucesso;
-    recv_result_t recv = {0, 0, 0};
-
     Serial.println("---,+");
+
+    recv_result_t recv = {0, 0, 0};
+    drawFeedback(true);
 
     do {
         // Tentar receber novamente em caso de erro da biblioteca
@@ -282,7 +297,7 @@ int16_t doReceiverLoop() {
     switch (recv.e) {
     case RADIOLIB_ERR_NONE: {
         // Nenhum erro ocorreu ao receber o pacote.
-        rxSucessos++;
+        currentTest.successes++;
 
         // E2 - Transmitir ACK para o transmissor até ter um sucesso.
         int16_t e = RADIOLIB_ERR_NONE;
@@ -290,6 +305,7 @@ int16_t doReceiverLoop() {
         // Esperamos um tempo antes de transmitir a próxima mensagem para que o
         // receptor consiga mudar de estado a tempo.
         delay(RX_WAIT_DELAY);
+        drawFeedback(false);
 
         do {
             // Tentar receber novamente em caso de erro da biblioteca
@@ -298,7 +314,7 @@ int16_t doReceiverLoop() {
                 delay(10);
             }
 
-            e = sendBlocking((const uint8_t *)"0Resposta", 9);
+            e = sendBlocking(msgReceiver, sizeof(msgReceiver));
         } while (e != RADIOLIB_ERR_NONE);
 
         Serial.printf("---,True,%.0f,%.0f;\n", radio.getRSSI(), radio.getSNR());
@@ -306,17 +322,17 @@ int16_t doReceiverLoop() {
     }
 
     case RADIOLIB_ERR_CRC_MISMATCH:
-        rxCorrompidos++;
+        currentTest.crcErrors++;
         Serial.printf("---,Fail,%.0f,%.0f;\n", radio.getRSSI(), radio.getSNR());
         break;
 
     case RADIOLIB_ERR_RX_TIMEOUT:
-        rxPerdidos++;
+        currentTest.losses++;
         Serial.println("---,False,*;");
         break;
 
     default:
-        rxPerdidos++;
+        currentTest.losses++;
         Serial.printf("---,False(%d),*;\n", recv.e);
         break;
     }
@@ -325,22 +341,41 @@ int16_t doReceiverLoop() {
     return recv.e;
 }
 
+// Desenha um feedback sobre o estado do teste atual na tela.
+void drawFeedback(bool isRecv) {
+#ifndef DO_STATE_FEEDBACK
+    return;
+#endif
+
+    display.setTextColor(BLACK, WHITE);
+    display.setCursor(2, 1);
+
+    if (isRecv) {
+        display.write('\x19');
+    } else {
+        display.write('\x18');
+    }
+
+    display.display();
+}
+
 // Desenha o cargo do ESP e o número atual do teste.
 void drawTitle() {
     const char *roleStr = role == kTransmitter ? "Transmissor" : "Receptor";
 
-    char cycleStr[64];
+    char progressStr[64];
 
     display.setCursor(0, 0);
     display.fillRect(0, 0, display.width(), 10, WHITE);
 
     display.setTextColor(BLACK);
-    drawAlignedText(&display, roleStr, 2, 2, kStart);
+    drawAlignedText(&display, roleStr, 10, 2, kStart);
 
     // Desenhar contagem de ciclos
-    snprintf(cycleStr, 64, "%d/%d", cyclesTotal + cycles,
-             POSSIBLE_PARAMETERS * TESTS_PER_CYCLE);
-    drawAlignedText(&display, cycleStr, 2, 2, kEnd);
+    uint32_t progress = wholeTest.progress + currentTest.progress;
+    snprintf(progressStr, 64, "%d/%d", progress,
+             POSSIBLE_PARAMETERS * TESTS_PER_CONFIG);
+    drawAlignedText(&display, progressStr, 2, 2, kEnd);
 }
 
 // Desenha um relatório do estado atual dos testes na tela.
@@ -353,11 +388,19 @@ void drawReport() {
     char okStr[24];
     char crcStr[24];
     char lostStr[24];
+    char toaStr[24];
+
+    display.setTextColor(WHITE);
 
     // Desenhar parâmetros
-    display.setTextColor(WHITE);
+    size_t msgLength =
+        role == kTransmitter ? sizeof(msgTransmitter) : sizeof(msgReceiver);
+    RadioLibTime_t toaUs = radio.getTimeOnAir(msgLength);
+
+    snprintf(toaStr, 24, "ToA %dms", toaUs / 1000);
     snprintf(sfStr, 8, "SF %hhu", dr.lora.spreadingFactor);
     snprintf(crStr, 8, "CR %hhu", dr.lora.codingRate);
+    drawAlignedText(&display, toaStr, 2, 18, kStart, kEnd);
     drawAlignedText(&display, sfStr, 2, 10, kStart, kEnd);
     drawAlignedText(&display, crStr, 2, 2, kStart, kEnd);
 
@@ -370,9 +413,12 @@ void drawReport() {
     drawAlignedText(&display, snrStr, 20, -4, kEnd, kCenter);
 
     // Desenhar contagens atuais
-    snprintf(okStr, 24, "%u ok  ", rxSucessos);
-    snprintf(crcStr, 24, "%u crc ", rxCorrompidos);
-    snprintf(lostStr, 24, "%u lost", rxPerdidos);
+    uint32_t successes = wholeTest.successes + currentTest.successes;
+    uint32_t crcErrors = wholeTest.crcErrors + currentTest.crcErrors;
+    uint32_t losses = wholeTest.losses + currentTest.losses;
+    snprintf(okStr, 24, "%u ok  ", successes);
+    snprintf(crcStr, 24, "%u crc ", crcErrors);
+    snprintf(lostStr, 24, "%u lost", losses);
     drawAlignedText(&display, okStr, 2, 18, kEnd, kEnd);
     drawAlignedText(&display, crcStr, 2, 10, kEnd, kEnd);
     drawAlignedText(&display, lostStr, 2, 2, kEnd, kEnd);
@@ -381,7 +427,7 @@ void drawReport() {
 void loop() {
     static enum { kSelection, kTesting } state = kSelection;
 
-    button.loop(400, 600);
+    button.loop();
 
     const char *roleStr = role == kTransmitter ? "Transmissor" : "Receptor";
 
@@ -395,6 +441,7 @@ void loop() {
             return;
         }
 
+        // Desenhar menu de seleção de cargo
         display.clearDisplay();
         display.setTextColor(WHITE);
 
@@ -421,8 +468,36 @@ void loop() {
         // Atualizar os parametros para a atual linha de testes
         updateParameters();
 
-        // Desenhar tela de confirmação
-        {
+        if (wholeTest.progress >= (TESTS_PER_CONFIG * POSSIBLE_PARAMETERS)) {
+            // Desenhar tela de fim
+            display.clearDisplay();
+            drawTitle();
+
+            display.setTextColor(WHITE);
+
+            char progressStr[64];
+            char okStr[24];
+            char crcStr[24];
+            char lostStr[24];
+
+            snprintf(progressStr, 64, "%d testes", wholeTest.progress);
+            snprintf(okStr, 24, "%d sucessos", wholeTest.successes);
+            snprintf(crcStr, 24, "%d malformados", wholeTest.crcErrors);
+            snprintf(lostStr, 24, "%d perdidos", wholeTest.losses);
+
+            drawAlignedText(&display, "Fim!", 0, 4, kCenter, kCenter);
+            drawAlignedText(&display, progressStr, 0, 12, kCenter, kCenter);
+            drawAlignedText(&display, okStr, 24, 20, kStart, kCenter);
+            drawAlignedText(&display, crcStr, 24, 28, kStart, kCenter);
+            drawAlignedText(&display, lostStr, 24, 36, kStart, kCenter);
+
+            display.display();
+
+            // Aguardar infinitamente
+            while (true) {
+            };
+        } else {
+            // Desenhar tela de confirmação
             char paramStr[32];
 
             display.clearDisplay();
@@ -440,11 +515,26 @@ void loop() {
         }
 
         while (!button.pressed()) {
-            button.loop(400, 600);
+            button.loop();
         };
 
-        while (cycles < TESTS_PER_CYCLE) {
-            cycles++;
+        // Esperar 3 segundos antes de iniciar os testes
+        char tMinus[64];
+        for (unsigned t = 3; t > 0; t--) {
+            display.clearDisplay();
+            drawTitle();
+
+            display.setTextColor(WHITE);
+
+            snprintf(tMinus, 64, "Iniciando em %ds...", t);
+            drawAlignedText(&display, tMinus, 0, 0, kCenter, kCenter);
+
+            display.display();
+            delay(1000);
+        }
+
+        while (currentTest.progress < TESTS_PER_CONFIG) {
+            currentTest.progress++;
 
             // Desenhar tela de relatório
             display.clearDisplay();
@@ -461,9 +551,12 @@ void loop() {
                 result = doReceiverLoop();
         }
 
-        // Iniciar próxima lista de testes ao chegar no ciclo 100.
-        cyclesTotal += cycles;
-        cycles = 0;
+        // Iniciar próxima lista de testes ao chegar no último teste.
+        wholeTest.progress += currentTest.progress;
+        wholeTest.successes += currentTest.successes;
+        wholeTest.crcErrors += currentTest.crcErrors;
+        wholeTest.losses += currentTest.losses;
+        currentTest = test_progress_t{0, 0, 0, 0};
 
         Serial.println("Um ciclo foi completo!");
 
