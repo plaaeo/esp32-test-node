@@ -230,6 +230,8 @@ int16_t doTransmitterLoop() {
         e = sendBlocking(msgTransmitter, sizeof(msgTransmitter));
     } while (e != RADIOLIB_ERR_NONE);
 
+    Serial.print("---,");
+
     // E2 - Receber ACK do receptor até ter um sucesso
     //
     // Similarmente, um sucesso ocorre quando o módulo consegue entrar no estado
@@ -301,6 +303,8 @@ int16_t doReceiverLoop() {
 
         // E2 - Transmitir ACK para o transmissor até ter um sucesso.
         int16_t e = RADIOLIB_ERR_NONE;
+
+        Serial.print("---,");
 
         // Esperamos um tempo antes de transmitir a próxima mensagem para que o
         // receptor consiga mudar de estado a tempo.
@@ -556,9 +560,12 @@ void loop() {
         wholeTest.successes += currentTest.successes;
         wholeTest.crcErrors += currentTest.crcErrors;
         wholeTest.losses += currentTest.losses;
-        currentTest = test_progress_t{0, 0, 0, 0};
 
-        Serial.println("Um ciclo foi completo!");
+        Serial.printf(
+            "Um ciclo foi completo! (%d sucessos, %d corrompidos, %d perdas)\n",
+            currentTest.successes, currentTest.crcErrors, currentTest.losses);
+
+        currentTest = test_progress_t{0, 0, 0, 0};
 
         break;
     }
