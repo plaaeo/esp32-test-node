@@ -1,42 +1,5 @@
 #pragma once
-#include <Adafruit_GFX.h>
 #include <cstdint>
-
-enum alignment_t { kStart, kCenter, kEnd };
-
-// Função útil para desenhar texto com alinhamento na tela
-void drawAlignedText(Adafruit_GFX *display, const char *text, int16_t x,
-                     int16_t y, alignment_t horizontal = alignment_t::kStart,
-                     alignment_t vertical = alignment_t::kStart) {
-    int16_t _x, _y;
-    uint16_t w, h;
-
-    display->getTextBounds(text, 0, 0, &_x, &_y, &w, &h);
-
-    // Alinhar a posição do texto horizontalmente, de acordo com a regra
-    // dada
-    switch (horizontal) {
-    case alignment_t::kCenter:
-        x += (display->width() - w) / 2;
-        break;
-    case alignment_t::kEnd:
-        x = display->width() - w - x;
-        break;
-    }
-
-    // Alinhar a posição do texto verticalmente, de acordo com a regra dada
-    switch (vertical) {
-    case alignment_t::kCenter:
-        y += (display->height() - h) / 2;
-        break;
-    case alignment_t::kEnd:
-        y = display->height() - h - y;
-        break;
-    }
-
-    display->setCursor(x, y);
-    display->println(text);
-}
 
 enum action_t {
     kIdle,
@@ -49,7 +12,14 @@ enum button_state_t { kReleased, kPressed, kLongPressed, kHeld };
 // Armazena o estado de um botão físico.
 class button_t {
 public:
-    button_t(uint32_t pin, uint32_t longPressTime, uint32_t holdTime) {
+    /// @brief Cria um novo botão.
+    /// @param pin O pino do botão.
+    /// @param longPressTime O tempo, em millisegundos, para contar um
+    /// pressionamento longo.
+    /// @param holdTime O tempo, em millisegundos, para contar uma segurada
+    /// (deve ser maior que `longPressTime`)
+    button_t(uint32_t pin, uint32_t longPressTime = 400,
+             uint32_t holdTime = 600) {
         this->pin = pin;
         this->longPressTime = longPressTime;
         this->holdTime = holdTime;
@@ -61,12 +31,12 @@ public:
         this->buffer = kReleased;
     }
 
-    // Inicializa o botão
+    /// @brief Inicializa o botão.
     void setup() {
         pinMode(this->pin, INPUT_PULLUP);
     }
 
-    // Atualiza o estado da estrutura para refletir o estado do botão.
+    /// @brief Atualiza o estado interno do botão.
     void loop() {
         bool pressed = digitalRead(this->pin) == LOW;
 
@@ -117,10 +87,9 @@ public:
         }
     }
 
-    // Detecta se o usuário está segurando o botão a mais de `holdTime`
-    // millisegundos. Caso true seja passado como parâmetro para o reset, o
-    // botão irá reiniciar o contador e esperar novamente para detectar se o
-    // usuário ainda está segurando o botão.
+    /// @brief Detecta se o usuário está segurando o botão a mais de `holdTime`
+    /// millisegundos. Caso esteja, o botão irá esperar mais `holdTime`
+    /// millisegundos para detectar se o usuário ainda está segurando o botão.
     bool held() {
         if (this->state == kHeld) {
             this->state = kLongPressed;
@@ -131,9 +100,9 @@ public:
         return false;
     }
 
-    // Retorna true no instante que é detectado que o usuário está segurando o
-    // botão a mais de `longPressTime` millisegundos, retornando `false` até que
-    // o usuário solte o botão.
+    /// @returns `true` no instante que é detectado que o usuário está
+    /// segurando o botão a mais de `longPressTime` millisegundos, retornando
+    /// `false` até que o usuário solte o botão.
     bool longPressed() {
         if (this->state == kLongPressed && this->action == kProcess) {
             this->action = kWait;
@@ -143,7 +112,7 @@ public:
         return false;
     }
 
-    // Retorna true no instante que o usuário solta o botão
+    /// @returns `true` no instante que o usuário solta o botão.
     bool pressed() {
         return consume(kPressed) == kPressed;
     }
