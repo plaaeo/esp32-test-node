@@ -1,5 +1,6 @@
 #pragma once
-#include "../lorarf/src/SX126x.h"
+#include "SX126x.h"
+#include <SPI.h>
 #include <cstdint>
 
 /**
@@ -76,11 +77,16 @@ struct radio_parameters_t {
 /// @brief Inicializa o radio LoRa.
 /// @returns `true` caso o radio tenha inicializado com sucesso.
 bool radioInit() {
+    SPI.begin(SCK, MISO, MOSI, SS);
+
     if (!_radio.begin(SS, RST_LoRa, BUSY_LoRa, DIO0, -1, -1))
         return false;
 
-    _radio.setModem(LORA_MODEM);
+	  _radio.setDio3TcxoCtrl(SX126X_DIO3_OUTPUT_1_8, SX126X_TCXO_DELAY_10);
     _radio.setFrequency(915000000);
+    _radio.setTxPower(22, SX126X_TX_POWER_SX1262);
+    _radio.setSyncWord(0x3444);
+
     return true;
 }
 
@@ -121,7 +127,7 @@ radio_error_t radioRecv(uint8_t *dest, uint8_t *length, uint32_t timeout = 0) {
 
     if (recvLength < *length)
         *length = recvLength;
-
+    
     // Ler o máximo possível que caiba em `dest`
     _radio.read(dest, *length);
 

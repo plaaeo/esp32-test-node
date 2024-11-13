@@ -1,11 +1,6 @@
 #pragma once
 #include "radio.h"
 
-/// @brief Define o tempo que o receptor e o transmissor esperam antes de
-/// transmitir uma mensagem. Usado para permitir que o outro ESP comece a
-/// receber mensagens a tempo.
-#define RX_WAIT_DELAY 100
-
 /// @brief Define a quantidade de testes para cada combinação de parâmetros.
 #define TESTS_PER_CONFIG 100
 

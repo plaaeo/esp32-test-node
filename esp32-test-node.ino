@@ -9,17 +9,14 @@
 /// @brief Define o tempo que o receptor e o transmissor esperam antes de
 /// transmitir uma mensagem. Usado para permitir que o outro ESP comece a
 /// receber mensagens a tempo.
-#define RX_WAIT_DELAY 100
-
-/// @brief Comente para remover feedback sobre o estado do teste
-#define DO_STATE_FEEDBACK
+#define RX_WAIT_DELAY 60
 
 /// @brief Atualiza os parametros para o teste atual.
 /// @returns O "índice" da configuração atual.
 uint32_t updateParameters() {
     uint32_t index = _moduleState.wholeTest.progress / TESTS_PER_CONFIG;
 
-    _moduleState.parameters.bandwidth = 250000000;
+    _moduleState.parameters.bandwidth = 250000;
     _moduleState.parameters.cr = cr[index % POSSIBLE_CR];
     _moduleState.parameters.sf = sf[(index / POSSIBLE_CR) % POSSIBLE_SF];
 
@@ -32,6 +29,31 @@ uint8_t msgTransmitter[255];
 uint8_t msgReceiver[] = "0Mensagem recebida";
 
 void setup() {
+    // Inicializar os parâmetros padrão da transmissão LoRa
+    _moduleState.parameters.boostedRxGain = false;
+    _moduleState.parameters.packetLength = 0;
+    _moduleState.parameters.preambleLength = 8;
+    _moduleState.parameters.bandwidth = 250000;
+    _moduleState.parameters.sf = 7;
+    _moduleState.parameters.cr = 5;
+    _moduleState.parameters.crc = true;
+    _moduleState.parameters.invertIq = false;
+
+    // Modifique o `progress` abaixo para iniciar o teste completo a partir de um índice especifico.
+    _moduleState.wholeTest = test_progress_t {
+        .progress = 0,
+        .successes = 0,
+        .crcErrors = 0,
+        .losses = 0,
+    };
+
+    _moduleState.currentTest = test_progress_t {
+        .progress = _moduleState.wholeTest.progress % TESTS_PER_CONFIG,
+        .successes = 0,
+        .crcErrors = 0,
+        .losses = 0,
+    };
+
     Serial.begin(115200);
 
     // Inicializar a mensagem do transmissor com "0AAAAA....."
@@ -68,14 +90,18 @@ radio_error_t doTransmitterLoop() {
 
     // Transmitir uma mensagem grande para o receptor.
     Serial.println("---,+");
+    Serial.flush();
+
     radioSend(msgTransmitter, sizeof(msgTransmitter));
+
     Serial.print("---,");
+    Serial.flush();
 
     // Esperar até receber ACK do receptor, ou ocorrer um timeout em 3000ms
     drawFeedback(true);
-    Serial.print("---,");
-    radio_error_t recvError = radioRecv(buffer, &length, 3000);
 
+    radio_error_t recvError = radioRecv(buffer, &length, 3000);
+    recvError = (length != sizeof(msgReceiver) ? kCrc : recvError);
     switch (recvError) {
     case kNone:
         // Nenhum erro ocorreu ao receber o pacote.
@@ -99,6 +125,7 @@ radio_error_t doTransmitterLoop() {
         break;
     }
 
+    Serial.flush();
     return recvError;
 }
 
@@ -110,20 +137,24 @@ radio_error_t doReceiverLoop() {
     // 3000ms
     drawFeedback(true);
     Serial.println("---,+");
-    radio_error_t recvError = radioRecv(buffer, &length, 3000);
-    Serial.print("---,");
+    Serial.flush();
 
+    radio_error_t recvError = radioRecv(buffer, &length, 3000);
+
+    Serial.print("---,");
+    Serial.flush();
+    recvError = (length != sizeof(msgTransmitter) ? kCrc : recvError);
     // Imprimir o resultado da recepção no `Serial`
     switch (recvError) {
     case kNone:
         // Esperamos um tempo antes de transmitir a próxima mensagem para que o
         // receptor consiga mudar de estado a tempo.
         delay(RX_WAIT_DELAY);
+        drawFeedback(false);
 
         // Enviar o ACK para o transmissor.
-        drawFeedback(false);
-        Serial.print("---,");
         radioSend(msgReceiver, sizeof(msgReceiver));
+        
         Serial.printf("---,True,%hd,%.0f;\n", radioRSSI(), radioSNR());
         break;
     case kCrc:
@@ -137,6 +168,8 @@ radio_error_t doReceiverLoop() {
         Serial.println("---,False(!),*;");
         break;
     }
+
+    Serial.flush();
 
     return recvError;
 }
@@ -175,7 +208,10 @@ void loop() {
     _moduleState.currentTest.progress++;
     _moduleState.wholeTest.progress++;
 
-    if (_moduleState.currentTest.progress / TESTS_PER_CONFIG) {
+    if (_moduleState.wholeTest.progress == TEST_COUNT) {
+        // Entrar no estado final da interface ao terminar todos os testes.
+        guiGoto(screen_t::kEndScreen);
+    } else if (_moduleState.currentTest.progress / TESTS_PER_CONFIG) {
         // Uma lista completa de testes foi feita!
         Serial.printf("Um ciclo foi completo! [SF%d/CR%d] (%d sucessos, %d "
                       "corrompidos, %d perdas)\n",
@@ -189,8 +225,5 @@ void loop() {
         // Atualiza os parâmetros para o próximo teste
         updateParameters();
         guiGoto(screen_t::kConfirmTest);
-    } else if (_moduleState.wholeTest.progress == TEST_COUNT) {
-        // Entrar no estado final da interface ao terminar todos os testes.
-        guiGoto(screen_t::kEndScreen);
     }
 }

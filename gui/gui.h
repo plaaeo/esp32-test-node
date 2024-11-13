@@ -6,13 +6,13 @@
 #include <Wire.h>
 #include <cstdint>
 
+/// @brief Comente para remover feedback sobre o estado do teste
+#define DO_STATE_FEEDBACK
+
 Adafruit_SSD1306 _display =
     Adafruit_SSD1306(DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, RST_OLED);
 
 button_t _button(GPIO_NUM_0, 400, 600);
-
-/// @brief Quando `true`, pula a etapa de desenhar a UI caso nada tenha mudado.
-bool _guiLazy = false;
 
 enum screen_t {
     /// @brief Tela de seleção de cargo.
@@ -31,11 +31,15 @@ screen_t guiProcess();
 
 /// @return Uma string com o cargo do módulo (receptor/transmissor).
 const char *guiRoleName() {
-    return _moduleState.role == kTransmitter ? "Transmissor" : "Receptor";
+    // NOTA: "Sender" e "Receiver" são usados ao invés de "Transmissor" e "Receptor"
+    // pois cabem melhor no OLED :p
+    return _moduleState.role == kTransmitter ? "Sender" : "Receiver";
 }
 
 /// @brief Inicializa o monitor OLED, o botão e o estado da interface gráfica.
 void guiInit() {
+    _button.setup();
+
     // Inicializa o monitor OLED
     Wire.begin(SDA_OLED, SCL_OLED);
     _display.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
@@ -46,7 +50,6 @@ void guiInit() {
 
     // Inicializar o estado da interface
     _guiScreen = screen_t::kRoleSelection;
-    _guiLazy = false;
 }
 
 /// @brief Atualiza a interface gráfica.
@@ -54,13 +57,10 @@ void guiInit() {
 bool guiLoop() {
     _button.loop();
 
-    screen_t next = guiProcess();
+    screen_t old = _guiScreen;
+    _guiScreen = guiProcess();
 
-    // Garante que telas novas vão ser desenhadas pelo menos uma vez.
-    _guiLazy = (next == _guiScreen);
-    _guiScreen = next;
-
-    return _guiScreen == screen_t::kReport;
+    return old == screen_t::kReport;
 }
 
 enum alignment_t {
@@ -204,15 +204,11 @@ screen_t guiProcess() {
         if (_button.longPressed()) {
             // Trocar o estado selecionado ao segurar o botão
             _moduleState.role = isTransmitter ? kReceiver : kTransmitter;
-            _guiLazy = false;
         } else if (_button.pressed()) {
             // Selecionar o estado ao pressionar o botão
             Serial.printf("Cargo \"%s\" selecionado\n", guiRoleName());
             return kConfirmTest;
         }
-
-        if (_guiLazy)
-            break;
 
         // Desenhar menu de seleção de cargo
         _display.clearDisplay();
@@ -228,10 +224,10 @@ screen_t guiProcess() {
                           rectWidth, 10, WHITE);
 
         _display.setTextColor(!isTransmitter ? BLACK : WHITE);
-        drawAlignedText("Receptor", 0, 0, kCenter, kCenter);
+        drawAlignedText("Receiver", 0, 0, kCenter, kCenter);
 
         _display.setTextColor(isTransmitter ? BLACK : WHITE);
-        drawAlignedText("Transmissor", 0, 10, kCenter, kCenter);
+        drawAlignedText("Sender", 0, 10, kCenter, kCenter);
 
         _display.display();
         break;
@@ -243,9 +239,6 @@ screen_t guiProcess() {
         // Iniciar contagem regressiva ao apertar o botão
         if (_button.pressed())
             return kCountdown;
-
-        if (_guiLazy)
-            break;
 
         _display.clearDisplay();
         drawTitle(_moduleState.wholeTest);
@@ -295,9 +288,6 @@ screen_t guiProcess() {
     case kEndScreen: {
         test_progress_t &test = _moduleState.wholeTest;
 
-        if (_guiLazy)
-            break;
-
         // Desenhar tela de fim
         _display.clearDisplay();
         drawTitle(test);
@@ -334,5 +324,4 @@ screen_t guiProcess() {
 /// @brief Muda a tela atual da interface gráfica.
 void guiGoto(screen_t screen) {
     _guiScreen = screen;
-    _guiLazy = false;
 };
